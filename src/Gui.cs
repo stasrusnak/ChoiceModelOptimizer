@@ -30,7 +30,22 @@ class PackFixGui : Form
     Label lHint;
     Button bDry, bWrite, bReport, bMark, bLog;
     List<Control> lockable = new List<Control>();
-    ProgressBar pb;
+    Bar pb;
+
+    // полоса прогресса в цветах темы (стандартная ProgressBar не перекрашивается)
+    class Bar : Control
+    {
+        double v; public Color Fill = Color.FromArgb(0, 102, 184), Frame = Color.FromArgb(80, 80, 86);
+        public Bar() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true); }
+        public double Value { get { return v; } set { v = Math.Max(0, Math.Min(1, value)); Invalidate(); } }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(BackColor);
+            int w = (int)Math.Round((Width - 2) * v);
+            if (w > 0) using (var b = new SolidBrush(Fill)) e.Graphics.FillRectangle(b, 1, 1, w, Height - 2);
+            using (var p = new Pen(Frame)) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+        }
+    }
     Label lStat;
     bool bakAuto = true, busy;
 
@@ -150,7 +165,7 @@ class PackFixGui : Form
         var sf = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true, Margin = new Padding(0) };
         sf.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         sf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        pb = new ProgressBar { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 0, Dock = DockStyle.Fill, Height = 16 };
+        pb = new Bar { Dock = DockStyle.Fill, Height = 16, Margin = new Padding(3, 5, 3, 5) };
         lStat = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Text = "Сначала пробный прогон, затем «Урезать»." };
         sf.Controls.Add(pb, 0, 0); sf.Controls.Add(lStat, 1, 0);
         t.Controls.Add(sf, 0, t.RowCount); t.SetColumnSpan(sf, 3); t.RowStyles.Add(new RowStyle(SizeType.AutoSize)); t.RowCount++;
@@ -159,6 +174,7 @@ class PackFixGui : Form
         tDir.Text = d0;
         Theme(this);
         lHint.ForeColor = cDim;
+        tOut.ForeColor = Color.White; // журнал — чисто белый, чтобы читался на тёмном фоне
         bWrite.BackColor = cAccent; bWrite.FlatAppearance.BorderColor = cAccent; bWrite.FlatAppearance.MouseOverBackColor = Color.FromArgb(0, 120, 212);
         tOut.HandleCreated += delegate { SetWindowTheme(tOut.Handle, "DarkMode_Explorer", null); };
 
@@ -354,8 +370,8 @@ class PackFixGui : Form
         Lock(true);
         tOut.Clear();
         Append("=== " + title + " ===\r\n");
-        pb.MarqueeAnimationSpeed = 30;
-        lStat.Text = "Идёт…";
+        pb.Value = 0;
+        lStat.Text = "Идёт… подсчёт файлов";
         var sw = Stopwatch.StartNew();
         string logPath = Path.Combine(args[0], "_packfix_log.txt");
         var th = new Thread(() =>
@@ -365,7 +381,17 @@ class PackFixGui : Form
             try
             {
                 Console.SetOut(new BoxWriter(Append));
-                PackFix.OnFiles = n => BeginInvoke((MethodInvoker)delegate { lStat.Text = "Идёт… просмотрено файлов: " + n; });
+                var tick = Stopwatch.StartNew();
+                PackFix.OnFiles = (n, total) =>
+                {
+                    if (n != 0 && n != total && tick.ElapsedMilliseconds < 50) return; // не чаще 20 раз в секунду
+                    tick.Restart();
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        pb.Value = total == 0 ? 1 : (double)n / total;
+                        lStat.Text = "Идёт… файлов " + n + " из " + total;
+                    });
+                };
                 code = PackFix.Run(args);
                 if (showLog && File.Exists(logPath))
                 {
@@ -381,7 +407,7 @@ class PackFixGui : Form
                 busy = false;
                 Lock(false);
                 UpdateHint();
-                pb.MarqueeAnimationSpeed = 0;
+                pb.Value = code == 0 ? 1 : pb.Value; // отчёт и отметка идут без счётчика — по завершении полоса полная
                 lStat.Text = (code == 0 ? "Готово" : "Завершено с ошибкой") + " за " + sw.Elapsed.TotalSeconds.ToString("0.0") + " с.";
                 tOut.SelectionStart = 0; tOut.ScrollToCaret();
             });

@@ -31,9 +31,10 @@ class PackFix
     static List<string> Log = new List<string>();
     static int nTex4, nTex2, nTexSkip, nTexBad, nMdx, nEmit;
     static double savedMB;
+    static long totalBytes, diskSaved; // общий вес папки и сколько байт на диске освобождено
     static CultureInfo IC = CultureInfo.InvariantCulture;
-    // окно (Gui.cs): вызывается каждые 200 просмотренных файлов
-    public static Action<int> OnFiles;
+    // окно (Gui.cs): ход обработки — (просмотрено файлов, всего файлов)
+    public static Action<int, int> OnFiles;
 
 #if !GUI
     static int Main(string[] args)
@@ -49,7 +50,7 @@ class PackFix
         Write = Force = Report = MarkDone = false; DoTex = DoPart = true; HalfShift = 1; MaxSide = 0; Quality = 65; KeepSize = false;
         Half.Clear(); Done.Clear(); Log.Clear();
         nTex4 = nTex2 = nTexSkip = nTexBad = nMdx = nEmit = 0; savedMB = 0;
-        nRec = nRecLow = nRecErr = 0; recBefore = recAfter = 0;
+        nRec = nRecLow = nRecErr = 0; recBefore = recAfter = 0; totalBytes = diskSaved = 0;
         if (args.Length == 0 || args[0] == "-h" || args[0] == "--help") { Help(); return 0; }
         Root = Path.GetFullPath(args[0].TrimEnd('\\', '/'));
         if (!Directory.Exists(Root)) { Console.WriteLine("Папка не найдена: " + Root); return 1; }
@@ -94,10 +95,14 @@ class PackFix
         Console.WriteLine((Write ? "ЗАПИСЬ" : "ПРОБНЫЙ ПРОГОН (без --write ничего не меняется)") + ": " + Root);
         if (Write) Console.WriteLine("Резервные копии: " + Backup);
         int nFiles = 0;
-        foreach (string p in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
+        string[] files = Directory.GetFiles(Root, "*", SearchOption.AllDirectories);
+        if (OnFiles != null) OnFiles(0, files.Length);
+        foreach (string p in files)
         {
-            if (OnFiles != null && ++nFiles % 200 == 0) OnFiles(nFiles);
+            if (OnFiles != null && (++nFiles % 10 == 0 || nFiles == files.Length)) OnFiles(nFiles, files.Length);
             string ext = Path.GetExtension(p).ToLowerInvariant();
+            string fn = Path.GetFileName(p);
+            if (fn != "_packfix_log.txt" && fn != "_packfix_done.txt") try { totalBytes += new FileInfo(p).Length; } catch { }
             try
             {
                 if (ext == ".blp")
@@ -109,6 +114,10 @@ class PackFix
             }
             catch (Exception e) { Log.Add("ERR " + Rel(p) + " " + e.Message); }
         }
+        string weight = "Общий вес папки: " + MB(totalBytes) + " -> " + MB(totalBytes - diskSaved) + " МБ"
+            + (Write ? "" : " (после записи)") + ", меньше на " + MB(diskSaved) + " МБ"
+            + (totalBytes > 0 ? " (" + Math.Round(100.0 * diskSaved / totalBytes) + "%)" : "");
+        Log.Add(""); Log.Add(weight);
         File.WriteAllLines(LogPath, Log, Encoding.UTF8);
         if (Write) File.WriteAllLines(DonePath, Done.Select(kv => kv.Key + "\t" + kv.Value), Encoding.UTF8);
         Console.WriteLine("Текстуры: /4 — " + nTex4 + ", /2 — " + nTex2 + ", без мипов — " + nTexSkip + ", возвращено из-за ошибки — " + nTexBad
@@ -117,6 +126,7 @@ class PackFix
             Console.WriteLine("Пережато JPEG (q=" + Quality + "): " + nRec + ", " + Math.Round(recBefore / 1048576.0, 1) + " -> " + Math.Round(recAfter / 1048576.0, 1)
                 + " МБ на диске | уже не выше q=" + Quality + " — " + nRecLow + ", не удалось — " + nRecErr);
         Console.WriteLine("Модели: " + nMdx + ", эмиттеров: " + nEmit);
+        Console.WriteLine(weight);
         Console.WriteLine("Журнал: " + LogPath);
         return 0;
     }
@@ -136,6 +146,7 @@ class PackFix
         Console.WriteLine("                 пиксели и альфа как есть, мип-уровни — полная цепочка до 1x1");
     }
 
+    static string MB(long b) { return Math.Round(b / 1048576.0, 1).ToString("0.0", IC); }
     static string Rel(string p) { return p.Substring(Root.Length).TrimStart('\\', '/'); }
     static string Stamp(string p) { FileInfo f = new FileInfo(p); return f.Length + "|" + f.LastWriteTimeUtc.Ticks; }
     static bool Skip(string p) { string s; return !Force && Done.TryGetValue(Rel(p), out s) && s == Stamp(p); }
@@ -206,6 +217,7 @@ class PackFix
         string err = CheckBlp(res);
         if (err != null) { nTexBad++; Log.Add("BAD (оставлен как был) " + Rel(p) + ": " + err); return; }
         if (s >= 2) nTex4++; else nTex2++;
+        diskSaved += b.Length - res.Length;
         savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576;
         Log.Add("BLP " + Rel(p) + " " + w + "x" + h + " -> " + nw + "x" + nh);
         if (Write) Save(p, res);
@@ -287,7 +299,7 @@ class PackFix
         string err = CheckBlp(res) ?? CheckMips(res);
         if (err != null) { nTexBad++; Log.Add("BAD (оставлен как был) " + Rel(p) + ": " + err); return; }
         if (s == 0 && res.Length >= b.Length) { nRecLow++; Log.Add("JPG не меньше — оставлен " + Rel(p) + " q" + q0); return; }
-        nRec++; recBefore += b.Length; recAfter += res.Length;
+        nRec++; recBefore += b.Length; recAfter += res.Length; diskSaved += b.Length - res.Length;
         if (s > 0) { if (s >= 2) nTex4++; else nTex2++; savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576; }
         Log.Add("JPG " + Rel(p) + " q" + q0 + " -> " + Quality + ", " + w + "x" + h + (s > 0 ? " -> " + nw + "x" + nh : "")
             + ", " + (b.Length + 512) / 1024 + " -> " + (res.Length + 512) / 1024 + " КБ, мипов " + mp.Count);
