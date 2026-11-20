@@ -124,7 +124,8 @@ class PackFix
             + " | экономия памяти ~" + Math.Round(savedMB) + " МБ");
         if (Quality > 0)
             Console.WriteLine("Пережато JPEG (q=" + Quality + "): " + nRec + ", " + Math.Round(recBefore / 1048576.0, 1) + " -> " + Math.Round(recAfter / 1048576.0, 1)
-                + " МБ на диске | уже не выше q=" + Quality + " — " + nRecLow + ", не удалось — " + nRecErr);
+                + " МБ на диске | оставлены в исходном качестве (уже не выше q=" + Quality + " или пережатие не уменьшило вес) — " + nRecLow
+                + ", не удалось — " + nRecErr);
         Console.WriteLine("Модели: " + nMdx + ", эмиттеров: " + nEmit);
         Console.WriteLine(weight);
         Console.WriteLine("Журнал: " + LogPath);
@@ -180,12 +181,13 @@ class PackFix
             else { long a = (long)w * h; if (a > 512 * 512) s = 2; else if (a == 512 * 512) s = 1; }
         }
         // пережатие: только JPEG-BLP с качеством заметно выше заданного (иначе лишняя потеря качества)
+        int q = -1;
         if (Quality > 0 && comp == 0)
         {
-            int q = BlpQuality(b);
+            q = BlpQuality(b);
             if (q > Quality + 2)
             {
-                try { RecBlp(p, b, s, q); return; }
+                try { if (RecBlp(p, b, s, q)) return; }
                 catch (Exception e) { nRecErr++; Log.Add("JPG ошибка " + Rel(p) + ": " + e.Message + " — без пережатия"); }
             }
             else nRecLow++;
@@ -219,7 +221,7 @@ class PackFix
         if (s >= 2) nTex4++; else nTex2++;
         diskSaved += b.Length - res.Length;
         savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576;
-        Log.Add("BLP " + Rel(p) + " " + w + "x" + h + " -> " + nw + "x" + nh);
+        Log.Add("BLP " + Rel(p) + " " + w + "x" + h + " -> " + nw + "x" + nh + (q > 0 ? ", без пережатия — качество исходное (q" + q + ")" : ""));
         if (Write) Save(p, res);
     }
 
@@ -262,7 +264,17 @@ class PackFix
     }
 
     // пережатие JPEG-BLP с качеством Quality (+ уменьшение на s мип-уровней), как save_blp1 в tools/icons/blp1.py
-    static void RecBlp(string p, byte[] b, int s, int q0)
+    // размер файла при простом уменьшении (готовые мипы с s-го, без пережатия); если мипа s нет — размер исходного
+    static long ShiftSize(byte[] b, int s)
+    {
+        if (U(b, 28 + s * 4) == 0 || U(b, 92 + s * 4) == 0) return b.Length;
+        long n = 160 + U(b, 156);
+        for (int j = s; j < 16; j++) { uint o = U(b, 28 + j * 4), z = U(b, 92 + j * 4); if (o != 0 && z != 0 && o + z <= b.Length) n += z; }
+        return n;
+    }
+
+    // false — не пережато (Blp продолжит без пережатия: оставит как есть или только уменьшит готовыми мипами)
+    static bool RecBlp(string p, byte[] b, int s, int q0)
     {
         uint w = U(b, 12), h = U(b, 16), hasMips = U(b, 24);
         uint nw = Math.Max(1u, w >> s), nh = Math.Max(1u, h >> s);
@@ -297,13 +309,21 @@ class PackFix
         foreach (byte[] m in mp) for (int i = k0; i < m.Length; i++) o.Add(m[i]);
         byte[] res = o.ToArray();
         string err = CheckBlp(res) ?? CheckMips(res);
-        if (err != null) { nTexBad++; Log.Add("BAD (оставлен как был) " + Rel(p) + ": " + err); return; }
-        if (s == 0 && res.Length >= b.Length) { nRecLow++; Log.Add("JPG не меньше — оставлен " + Rel(p) + " q" + q0); return; }
+        if (err != null) { nRecErr++; Log.Add("JPG ошибка " + Rel(p) + ": " + err + " — без пережатия"); return false; }
+        // пережатие не должно добавлять вес: сравнить с вариантом без пережатия (как есть или только готовые мипы)
+        long alt = s == 0 ? b.Length : ShiftSize(b, s);
+        if (res.Length >= alt)
+        {
+            nRecLow++;
+            Log.Add("JPG не меньше — " + (s == 0 ? "оставлен как был " : "только уменьшение, без пережатия ") + Rel(p) + " q" + q0);
+            return false;
+        }
         nRec++; recBefore += b.Length; recAfter += res.Length; diskSaved += b.Length - res.Length;
         if (s > 0) { if (s >= 2) nTex4++; else nTex2++; savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576; }
         Log.Add("JPG " + Rel(p) + " q" + q0 + " -> " + Quality + ", " + w + "x" + h + (s > 0 ? " -> " + nw + "x" + nh : "")
             + ", " + (b.Length + 512) / 1024 + " -> " + (res.Length + 512) / 1024 + " КБ, мипов " + mp.Count);
         if (Write) Save(p, res);
+        return true;
     }
 
     // все мипы на месте, их число — полная цепочка, размер каждого в SOF совпадает с ожидаемым
