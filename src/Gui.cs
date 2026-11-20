@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -15,7 +16,17 @@ class PackFixGui : Form
     RadioButton rAll, rTex, rPart;
     CheckBox cForce;
     ComboBox cHalf, cTex;
-    static readonly int[] TexMax = { 0, 512, 256, 128 };
+    TrackBar trQ;
+    NumericUpDown nQ;
+    Label lQ;
+    static readonly int[] TexMax = { 0, -1, 512, 256, 128 }; // -1 — не менять размер
+
+    // тёмная тема
+    static readonly Color cBg = Color.FromArgb(30, 30, 32), cField = Color.FromArgb(45, 45, 48), cBtn = Color.FromArgb(55, 55, 60),
+        cBtnHover = Color.FromArgb(70, 70, 76), cBorder = Color.FromArgb(80, 80, 86), cFg = Color.FromArgb(225, 225, 225),
+        cDim = Color.FromArgb(150, 150, 155), cAccent = Color.FromArgb(0, 102, 184);
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string id);
     Label lHint;
     Button bDry, bWrite, bReport, bMark, bLog;
     List<Control> lockable = new List<Control>();
@@ -70,12 +81,24 @@ class PackFixGui : Form
         AddRow(t, "Что урезать:", f, null);
         var tf = Flow();
         cTex = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
-        cTex.Items.AddRange(new object[] { "по правилу: больше 512 — в 4 раза, 512 — в 2 раза", "все до 512", "все до 256", "все до 128" });
+        cTex.Items.AddRange(new object[] { "по правилу: больше 512 — в 4 раза, 512 — в 2 раза", "не менять размер (только сжатие)", "все до 512", "все до 256", "все до 128" });
         cTex.SelectedIndex = 0;
         lockable.Add(cTex);
         tf.Controls.Add(cTex);
         AddRow(t, "Размер текстур:", tf, null);
-        tip.SetToolTip(cTex, "«Все до N» (--max N): каждая текстура больше N по большей стороне уменьшается до N готовыми мип-уровнями.\nТекстуры не больше N не меняются, поэтому повторный запуск ничего не урежет повторно.");
+        tip.SetToolTip(cTex, "«Все до N» (--max N): каждая текстура больше N по большей стороне уменьшается до N готовыми мип-уровнями.\nТекстуры не больше N не меняются, поэтому повторный запуск ничего не урежет повторно.\n«Не менять размер» (--keep-size): только пережатие JPEG.");
+
+        // сжатие JPEG: ползунок + поле
+        var qf = Flow();
+        trQ = new TrackBar { Minimum = 0, Maximum = 100, TickFrequency = 10, SmallChange = 1, LargeChange = 5, Value = 65, Width = 300, AutoSize = false, Height = 30 };
+        nQ = new NumericUpDown { Minimum = 0, Maximum = 100, Value = 65, Width = 60, Margin = new Padding(6, 4, 3, 3), BorderStyle = BorderStyle.FixedSingle };
+        lQ = new Label { AutoSize = true, Margin = new Padding(3, 7, 3, 3) };
+        trQ.ValueChanged += delegate { if (nQ.Value != trQ.Value) nQ.Value = trQ.Value; };
+        nQ.ValueChanged += delegate { if (trQ.Value != (int)nQ.Value) trQ.Value = (int)nQ.Value; UpdateHint(); };
+        lockable.Add(trQ); lockable.Add(nQ);
+        qf.Controls.AddRange(new Control[] { trQ, nQ, lQ });
+        tip.SetToolTip(trQ, "--quality: JPEG-текстуры с качеством выше заданного пересохраняются с этим качеством (как tools/icons/blp1.py).\nПиксели и прозрачность не меняются, мип-уровни строятся заново — полная цепочка до 1×1.\n0 — не пережимать. Стандарт — 65.");
+        tip.SetToolTip(nQ, tip.GetToolTip(trQ));
 
         // --half
         tHalf = Box();
@@ -96,6 +119,9 @@ class PackFixGui : Form
         EventHandler upd = delegate { UpdateHint(); };
         rAll.CheckedChanged += upd; rTex.CheckedChanged += upd; rPart.CheckedChanged += upd; cForce.CheckedChanged += upd;
         tHalf.TextChanged += upd; cHalf.SelectedIndexChanged += upd; cTex.SelectedIndexChanged += upd;
+
+        // ползунок сжатия — под описанием, над кнопками
+        AddRow(t, "Сжатие JPEG:", qf, null);
         UpdateHint();
 
         // кнопки
@@ -131,7 +157,45 @@ class PackFixGui : Form
 
         string d0 = startDir ?? (Directory.Exists(@"F:\ChoiceModels") ? @"F:\ChoiceModels" : "");
         tDir.Text = d0;
+        Theme(this);
+        lHint.ForeColor = cDim;
+        bWrite.BackColor = cAccent; bWrite.FlatAppearance.BorderColor = cAccent; bWrite.FlatAppearance.MouseOverBackColor = Color.FromArgb(0, 120, 212);
+        tOut.HandleCreated += delegate { SetWindowTheme(tOut.Handle, "DarkMode_Explorer", null); };
+
         FormClosing += (s, e) => { if (busy && MessageBox.Show(this, "Обработка ещё идёт. Закрыть всё равно?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) e.Cancel = true; };
+    }
+
+    // ---------- тёмная тема ----------
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        int on = 1; // тёмный заголовок окна (Windows 10 1809+ / 11)
+        try { if (DwmSetWindowAttribute(Handle, 20, ref on, 4) != 0) DwmSetWindowAttribute(Handle, 19, ref on, 4); } catch { }
+    }
+
+    void Theme(Control c)
+    {
+        c.BackColor = cBg; c.ForeColor = cFg;
+        if (c is TextBox) { ((TextBox)c).BorderStyle = BorderStyle.FixedSingle; c.BackColor = cField; }
+        else if (c is NumericUpDown) c.BackColor = cField;
+        else if (c is ComboBox) { ((ComboBox)c).FlatStyle = FlatStyle.Flat; c.BackColor = cField; }
+        else if (c is Button)
+        {
+            var b = (Button)c;
+            b.FlatStyle = FlatStyle.Flat; b.BackColor = cBtn; b.UseVisualStyleBackColor = false;
+            b.FlatAppearance.BorderColor = cBorder; b.FlatAppearance.MouseOverBackColor = cBtnHover; b.FlatAppearance.MouseDownBackColor = cBorder;
+        }
+        foreach (Control ch in c.Controls) Theme(ch);
+    }
+
+    // на время работы: поля только для чтения (выключенный TextBox в тёмной теме становится светлым), остальное выключено
+    void Lock(bool on)
+    {
+        foreach (Control c in lockable)
+        {
+            if (c is TextBox) ((TextBox)c).ReadOnly = on;
+            else c.Enabled = !on;
+        }
     }
 
     // ---------- построение ----------
@@ -174,16 +238,24 @@ class PackFixGui : Form
         cHalf.Enabled = half && !busy;
         rAll.Enabled = rTex.Enabled = rPart.Enabled = cForce.Enabled = !half && !busy;
         cTex.Enabled = !half && !rPart.Checked && !busy;
+        bool qOn = (half || !rPart.Checked) && !busy;
+        trQ.Enabled = nQ.Enabled = qOn;
+        int q = (int)nQ.Value;
+        lQ.Text = q == 0 ? "не пережимать" : "% качества (стандарт 65, 0 — не пережимать)";
         int mx = TexMax[cTex.SelectedIndex];
-        string texRule = mx == 0 ? TexRule : "Текстуры: все больше " + mx + " по большей стороне уменьшаются до " + mx
+        string texRule = mx == 0 ? TexRule : mx < 0 ? "Текстуры: размер не меняется." : "Текстуры: все больше " + mx + " по большей стороне уменьшаются до " + mx
             + " (например, 1024×1024 → " + mx + "×" + mx + ", 1024×512 → " + mx + "×" + (mx / 2) + "), остальные не трогаются. "
             + "Касается всех текстур, в том числе портретов и раскадровок, и уже урезанных раньше.";
+        texRule += "\n" + (q == 0 ? "Сжатие JPEG выключено."
+            : "Сжатие: JPEG-текстуры с качеством выше " + q + " пересохраняются с качеством " + q + " — пиксели и прозрачность как есть, "
+              + "мип-уровни строятся заново полной цепочкой (512×512 — 10). Текстуры уже не выше " + q + " и палитровые не трогаются.");
         string s;
         if (half)
             s = "Только выбранные текстуры (" + HalfNames().Length + "): " + (cHalf.SelectedIndex == 1
                 ? "ещё в 4 раза по стороне — 512×512 → 128×128, 256×256 → 64×64 (памяти в 16 раз меньше)."
                 : "ещё в 2 раза по стороне — 512×512 → 256×256, 256×256 → 128×128 (памяти в 4 раза меньше).")
-                + " Остальное не трогается. Урезается от текущего размера: каждый запуск уменьшает их снова.";
+                + " Остальное не трогается. Урезается от текущего размера: каждый запуск уменьшает их снова."
+                + (q == 0 ? "" : " Если их качество JPEG выше " + q + ", они заодно пережимаются.");
         else
         {
             s = rTex.Checked ? texRule : rPart.Checked ? PartRule : texRule + "\n" + PartRule;
@@ -245,7 +317,10 @@ class PackFixGui : Form
             what = rTex.Checked ? "текстуры" : rPart.Checked ? "частицы" : "текстуры и частицы";
             int mx = TexMax[cTex.SelectedIndex];
             if (mx > 0 && !rPart.Checked) { a.Add("--max"); a.Add(mx.ToString()); what = what.Replace("текстуры", "текстуры (все до " + mx + ")"); }
+            if (mx < 0 && !rPart.Checked) { a.Add("--keep-size"); what = what.Replace("текстуры", "текстуры (без изменения размера)"); }
         }
+        a.Add("--quality"); a.Add(((int)nQ.Value).ToString());
+        if (half.Length > 0 || !rPart.Checked) what += nQ.Value == 0 ? ", без пережатия JPEG" : ", сжатие JPEG " + nQ.Value + "%";
         if (cForce.Checked && half.Length == 0) { a.Add("--force"); what += ", включая уже обработанные"; }
         if (write)
         {
@@ -276,7 +351,7 @@ class PackFixGui : Form
     {
         if (!CheckDir()) return;
         busy = true;
-        foreach (Control c in lockable) c.Enabled = false;
+        Lock(true);
         tOut.Clear();
         Append("=== " + title + " ===\r\n");
         pb.MarqueeAnimationSpeed = 30;
@@ -304,7 +379,7 @@ class PackFixGui : Form
             BeginInvoke((MethodInvoker)delegate
             {
                 busy = false;
-                foreach (Control c in lockable) c.Enabled = true;
+                Lock(false);
                 UpdateHint();
                 pb.MarqueeAnimationSpeed = 0;
                 lStat.Text = (code == 0 ? "Готово" : "Завершено с ошибкой") + " за " + sw.Elapsed.TotalSeconds.ToString("0.0") + " с.";

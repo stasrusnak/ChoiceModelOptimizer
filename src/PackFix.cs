@@ -6,6 +6,9 @@
 // затем сумма по модели > 3000 — частота всех / до 2, сумма выброса > 300 — выброс / до 4.
 // Размер частиц везде растёт на корень из коэффициента — эффект закрывает ту же площадь меньшим числом частиц.
 // Обработанные файлы записываются в _packfix_done.txt в папке и повторно не урезаются (кроме --force).
+// Пережатие JPEG (--quality Q, по умолчанию 65, 0 — выкл.): JPEG-BLP с качеством выше Q пересохраняется с качеством Q
+// по алгоритму tools/icons/blp1.py (CMYK без APP14, общий заголовок), пиксели и альфа не меняются,
+// мип-уровни строятся заново — полная цепочка до 1x1 (512x512 — 10 мипов). Палитровые BLP не трогаются.
 // Сборка: build.bat (csc из .NET Framework 4).
 using System;
 using System.Collections.Generic;
@@ -20,6 +23,9 @@ class PackFix
     static bool Write, DoTex = true, DoPart = true, Force, Report, MarkDone;
     static int HalfShift = 1; // --half: 1 — в 2 раза по стороне, 2 — в 4 раза
     static int MaxSide;       // --max N: все текстуры больше N по большей стороне — до N (вместо правила площади)
+    static int Quality = 65;  // --quality Q: пережать JPEG-BLP с качеством выше Q; 0 — не пережимать
+    static bool KeepSize;     // --keep-size: размер текстур не менять (только пережатие)
+    static int nRec, nRecLow, nRecErr; static long recBefore, recAfter;
     static HashSet<string> Half = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static Dictionary<string, string> Done = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     static List<string> Log = new List<string>();
@@ -40,9 +46,10 @@ class PackFix
     public static int Run(string[] args)
     {
         // состояние прошлого запуска (в окне Run вызывается много раз)
-        Write = Force = Report = MarkDone = false; DoTex = DoPart = true; HalfShift = 1; MaxSide = 0;
+        Write = Force = Report = MarkDone = false; DoTex = DoPart = true; HalfShift = 1; MaxSide = 0; Quality = 65; KeepSize = false;
         Half.Clear(); Done.Clear(); Log.Clear();
         nTex4 = nTex2 = nTexSkip = nTexBad = nMdx = nEmit = 0; savedMB = 0;
+        nRec = nRecLow = nRecErr = 0; recBefore = recAfter = 0;
         if (args.Length == 0 || args[0] == "-h" || args[0] == "--help") { Help(); return 0; }
         Root = Path.GetFullPath(args[0].TrimEnd('\\', '/'));
         if (!Directory.Exists(Root)) { Console.WriteLine("Папка не найдена: " + Root); return 1; }
@@ -58,6 +65,8 @@ class PackFix
             else if (a == "--particles-only") DoTex = false;
             else if (a == "--backup" && i + 1 < args.Length) Backup = Path.GetFullPath(args[++i]);
             else if (a == "--half4") HalfShift = 2;
+            else if (a == "--keep-size") KeepSize = true;
+            else if (a == "--quality" && i + 1 < args.Length && int.TryParse(args[i + 1], out Quality) && Quality >= 0 && Quality <= 100) i++;
             else if (a == "--max" && i + 1 < args.Length && int.TryParse(args[i + 1], out MaxSide) && MaxSide > 0) i++;
             else if (a == "--half" && i + 1 < args.Length) { foreach (string n in args[++i].Split(',')) if (n.Trim() != "") Half.Add(n.Trim()); }
             else { Console.WriteLine("Неизвестный параметр: " + a); Help(); return 1; }
@@ -104,6 +113,9 @@ class PackFix
         if (Write) File.WriteAllLines(DonePath, Done.Select(kv => kv.Key + "\t" + kv.Value), Encoding.UTF8);
         Console.WriteLine("Текстуры: /4 — " + nTex4 + ", /2 — " + nTex2 + ", без мипов — " + nTexSkip + ", возвращено из-за ошибки — " + nTexBad
             + " | экономия памяти ~" + Math.Round(savedMB) + " МБ");
+        if (Quality > 0)
+            Console.WriteLine("Пережато JPEG (q=" + Quality + "): " + nRec + ", " + Math.Round(recBefore / 1048576.0, 1) + " -> " + Math.Round(recAfter / 1048576.0, 1)
+                + " МБ на диске | уже не выше q=" + Quality + " — " + nRecLow + ", не удалось — " + nRecErr);
         Console.WriteLine("Модели: " + nMdx + ", эмиттеров: " + nEmit);
         Console.WriteLine("Журнал: " + LogPath);
         return 0;
@@ -111,7 +123,7 @@ class PackFix
 
     static void Help()
     {
-        Console.WriteLine("ChoicePackFix <папка> [--write] [--backup <папка>] [--textures-only | --particles-only] [--force] [--report] [--half a.blp,b.blp [--half4]] [--max 256] [--mark-done]");
+        Console.WriteLine("ChoiceOptimizer <папка> [--write] [--backup <папка>] [--textures-only | --particles-only] [--force] [--report] [--half a.blp,b.blp [--half4]] [--max 256 | --keep-size] [--quality 65] [--mark-done]");
         Console.WriteLine("  без --write  — только пробный прогон и журнал _packfix_log.txt");
         Console.WriteLine("  --write      — изменить файлы (оригиналы копируются в <папка>_backup, если их там ещё нет)");
         Console.WriteLine("  --force      — урезать и файлы из _packfix_done.txt (уже обработанные)");
@@ -119,6 +131,9 @@ class PackFix
         Console.WriteLine("  --mark-done  — отметить все текущие .mdx/.blp как уже обработанные (для уже урезанной папки)");
         Console.WriteLine("  --half       — только эти текстуры, ещё в 2 раза по стороне (например, у одного героя); с --half4 — в 4 раза");
         Console.WriteLine("  --max N      — вместо правила: все текстуры больше N по большей стороне уменьшить до N (например, 256)");
+        Console.WriteLine("  --keep-size  — размер текстур не менять (только пережатие JPEG)");
+        Console.WriteLine("  --quality Q  — пережать JPEG-BLP с качеством выше Q до Q (по умолчанию 65; 0 — не пережимать);");
+        Console.WriteLine("                 пиксели и альфа как есть, мип-уровни — полная цепочка до 1x1");
     }
 
     static string Rel(string p) { return p.Substring(Root.Length).TrimStart('\\', '/'); }
@@ -143,14 +158,28 @@ class PackFix
     // forceShift 1 — режим --half; 0 — по правилу площади
     static void Blp(string p, int forceShift)
     {
-        // --max не зависит от _packfix_done.txt: текстура, которая уже не больше N, всё равно не меняется
-        if (Skip(p) && forceShift == 0 && MaxSide == 0) return;
         byte[] b = File.ReadAllBytes(p);
         if (b.Length < 160 || Tag(b, 0) != "BLP1") return;
         uint comp = U(b, 4), w = U(b, 12), h = U(b, 16), mips = U(b, 24);
         int s = forceShift;
-        if (s == 0 && MaxSide > 0) { while (Math.Max(w, h) >> s > MaxSide) s++; if (s == 0) return; }
-        else if (s == 0) { long a = (long)w * h; if (a > 512 * 512) s = 2; else if (a == 512 * 512) s = 1; else return; }
+        // --max не зависит от _packfix_done.txt: текстура, которая уже не больше N, всё равно не меняется
+        if (s == 0 && !KeepSize && !(Skip(p) && MaxSide == 0))
+        {
+            if (MaxSide > 0) { while (Math.Max(w, h) >> s > MaxSide) s++; }
+            else { long a = (long)w * h; if (a > 512 * 512) s = 2; else if (a == 512 * 512) s = 1; }
+        }
+        // пережатие: только JPEG-BLP с качеством заметно выше заданного (иначе лишняя потеря качества)
+        if (Quality > 0 && comp == 0)
+        {
+            int q = BlpQuality(b);
+            if (q > Quality + 2)
+            {
+                try { RecBlp(p, b, s, q); return; }
+                catch (Exception e) { nRecErr++; Log.Add("JPG ошибка " + Rel(p) + ": " + e.Message + " — без пережатия"); }
+            }
+            else nRecLow++;
+        }
+        if (s == 0) return;
         uint[] off = new uint[16], sz = new uint[16];
         for (int i = 0; i < 16; i++) { off[i] = U(b, 28 + i * 4); sz[i] = U(b, 92 + i * 4); }
         if (mips == 0 || off[s] == 0 || sz[s] == 0 || off[s] + sz[s] > b.Length) { nTexSkip++; Log.Add("SKIP (нет мипов) " + Rel(p) + " " + w + "x" + h); return; }
@@ -180,6 +209,105 @@ class PackFix
         savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576;
         Log.Add("BLP " + Rel(p) + " " + w + "x" + h + " -> " + nw + "x" + nh);
         if (Write) Save(p, res);
+    }
+
+    // JPEG мипа i (общий заголовок + данные мипа) или null
+    static byte[] MipJpeg(byte[] b, int i)
+    {
+        uint o = U(b, 28 + i * 4), sz = U(b, 92 + i * 4), jh = U(b, 156);
+        if (o == 0 || sz == 0 || o + sz > b.Length || 160 + jh > b.Length) return null;
+        byte[] j = new byte[jh + sz]; Array.Copy(b, 160, j, 0, jh); Array.Copy(b, o, j, jh, sz);
+        return j;
+    }
+
+    static int BlpQuality(byte[] b) { byte[] j = MipJpeg(b, 0); return j == null ? -1 : Jpeg.Quality(j); }
+
+    // полная цепочка мипов до 1x1: 512x512 — 10, 1024x1024 — 11, 256x256 — 9
+    static int FullMips(uint w, uint h) { int n = 1; uint m = Math.Max(w, h); while (m > 1 && n < 16) { m >>= 1; n++; } return n; }
+    static int MipCount(byte[] b) { int n = 0; while (n < 16 && U(b, 28 + n * 4) != 0 && U(b, 92 + n * 4) != 0) n++; return n; }
+
+    // 2x2 усреднение каждого канала
+    static byte[][] HalfPx(byte[][] px, ref int w, ref int h)
+    {
+        int nw = Math.Max(1, w / 2), nh = Math.Max(1, h / 2);
+        byte[][] r = new byte[px.Length][];
+        for (int c = 0; c < px.Length; c++)
+        {
+            byte[] s = px[c], o = new byte[nw * nh];
+            for (int y = 0; y < nh; y++)
+            {
+                int y0 = Math.Min(2 * y, h - 1) * w, y1 = Math.Min(2 * y + 1, h - 1) * w;
+                for (int x = 0; x < nw; x++)
+                {
+                    int x0 = Math.Min(2 * x, w - 1), x1 = Math.Min(2 * x + 1, w - 1);
+                    o[y * nw + x] = (byte)((s[y0 + x0] + s[y0 + x1] + s[y1 + x0] + s[y1 + x1] + 2) >> 2);
+                }
+            }
+            r[c] = o;
+        }
+        w = nw; h = nh;
+        return r;
+    }
+
+    // пережатие JPEG-BLP с качеством Quality (+ уменьшение на s мип-уровней), как save_blp1 в tools/icons/blp1.py
+    static void RecBlp(string p, byte[] b, int s, int q0)
+    {
+        uint w = U(b, 12), h = U(b, 16), hasMips = U(b, 24);
+        uint nw = Math.Max(1u, w >> s), nh = Math.Max(1u, h >> s);
+        // источник — готовый мип s (если есть), иначе мип 0 с уменьшением
+        int src = MipJpeg(b, s) != null ? s : 0;
+        byte[] j = MipJpeg(b, src);
+        if (j == null) throw new Exception("мип 0 вне файла");
+        int jw, jh;
+        byte[][] px = Jpeg.Decode(j, out jw, out jh);
+        if (px.Length != 4) throw new Exception("каналов " + px.Length + ", ожидалось 4");
+        for (int k = src; k < s; k++) px = HalfPx(px, ref jw, ref jh);
+        if (jw != nw || jh != nh) throw new Exception("размер JPEG " + jw + "x" + jh + " != " + nw + "x" + nh);
+        // мипы: полная цепочка до 1x1 (у текстур без мипов в заголовке — только основной)
+        List<byte[]> mp = new List<byte[]>();
+        while (true)
+        {
+            mp.Add(Jpeg.Encode(px, jw, jh, Quality));
+            if (hasMips == 0 || (jw == 1 && jh == 1) || mp.Count == 16) break;
+            px = HalfPx(px, ref jw, ref jh);
+        }
+        // общий заголовок — общий префикс всех мипов (не длиннее 624, как в blp1.py)
+        int n = mp.Min(x => x.Length), k0 = 0;
+        while (k0 < n && k0 < 624) { byte c = mp[0][k0]; if (mp.Any(x => x[k0] != c)) break; k0++; }
+        byte[] head = new byte[160];
+        Array.Copy(b, head, 28);
+        WU(head, 12, nw); WU(head, 16, nh); WU(head, 156, (uint)k0);
+        uint pos = (uint)(160 + k0);
+        for (int i = 0; i < mp.Count; i++) { WU(head, 28 + i * 4, pos); WU(head, 92 + i * 4, (uint)(mp[i].Length - k0)); pos += (uint)(mp[i].Length - k0); }
+        List<byte> o = new List<byte>((int)pos);
+        o.AddRange(head);
+        for (int i = 0; i < k0; i++) o.Add(mp[0][i]);
+        foreach (byte[] m in mp) for (int i = k0; i < m.Length; i++) o.Add(m[i]);
+        byte[] res = o.ToArray();
+        string err = CheckBlp(res) ?? CheckMips(res);
+        if (err != null) { nTexBad++; Log.Add("BAD (оставлен как был) " + Rel(p) + ": " + err); return; }
+        if (s == 0 && res.Length >= b.Length) { nRecLow++; Log.Add("JPG не меньше — оставлен " + Rel(p) + " q" + q0); return; }
+        nRec++; recBefore += b.Length; recAfter += res.Length;
+        if (s > 0) { if (s >= 2) nTex4++; else nTex2++; savedMB += ((double)w * h - (double)nw * nh) * 4 * 4 / 3 / 1048576; }
+        Log.Add("JPG " + Rel(p) + " q" + q0 + " -> " + Quality + ", " + w + "x" + h + (s > 0 ? " -> " + nw + "x" + nh : "")
+            + ", " + (b.Length + 512) / 1024 + " -> " + (res.Length + 512) / 1024 + " КБ, мипов " + mp.Count);
+        if (Write) Save(p, res);
+    }
+
+    // все мипы на месте, их число — полная цепочка, размер каждого в SOF совпадает с ожидаемым
+    static string CheckMips(byte[] b)
+    {
+        uint w = U(b, 12), h = U(b, 16);
+        int n = MipCount(b), need = U(b, 24) == 0 ? 1 : FullMips(w, h);
+        if (n != need) return "мипов " + n + ", нужно " + need;
+        for (int i = 0; i < n; i++)
+        {
+            byte[] j = MipJpeg(b, i);
+            if (j == null) return "мип " + i + " вне файла";
+            int jw, jh; Jpeg.Decode(j, out jw, out jh);
+            if (jw != Math.Max(1u, w >> i) || jh != Math.Max(1u, h >> i)) return "мип " + i + ": " + jw + "x" + jh;
+        }
+        return null;
     }
 
     // мип 0 в границах файла; у JPEG размер в маркере SOF совпадает с заголовком
@@ -304,6 +432,7 @@ class PackFix
     {
         List<Tuple<string, double, double>> m = new List<Tuple<string, double, double>>();
         List<Tuple<string, uint, uint>> t = new List<Tuple<string, uint, uint>>();
+        int[] qs = new int[4]; List<string> mipBad = new List<string>();
         foreach (string p in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
         {
             string ext = Path.GetExtension(p).ToLowerInvariant();
@@ -316,12 +445,20 @@ class PackFix
                 }
                 else if (ext == ".blp")
                 {
-                    byte[] h = new byte[20]; using (FileStream fs = File.OpenRead(p)) fs.Read(h, 0, 20);
-                    if (Tag(h, 0) == "BLP1") t.Add(Tuple.Create(Rel(p), U(h, 12), U(h, 16)));
+                    byte[] h = File.ReadAllBytes(p);
+                    if (h.Length < 160 || Tag(h, 0) != "BLP1") continue;
+                    t.Add(Tuple.Create(Rel(p), U(h, 12), U(h, 16)));
+                    int q = U(h, 4) == 0 ? BlpQuality(h) : 0;
+                    qs[q <= 0 ? 0 : q <= 65 ? 1 : q <= 80 ? 2 : 3]++;
+                    int n = MipCount(h), need = U(h, 24) == 0 ? 1 : FullMips(U(h, 12), U(h, 16));
+                    if (n < need) mipBad.Add(Rel(p) + " — " + U(h, 12) + "x" + U(h, 16) + ", мипов " + n + " из " + need);
                 }
             }
             catch { }
         }
+        Console.WriteLine("Качество JPEG текстур: до 65 — " + qs[1] + ", 66-80 — " + qs[2] + ", выше 80 — " + qs[3] + ", палитровые/неизвестно — " + qs[0]);
+        Console.WriteLine("Неполная цепочка мипов: " + mipBad.Count + (mipBad.Count > 0 ? " (пережатие строит полную)" : ""));
+        foreach (string x in mipBad.Take(15)) Console.WriteLine("  " + x);
         Console.WriteLine("Моделей " + m.Count + ", текстур " + t.Count);
         Console.WriteLine("\nБольше всего частиц одновременно:");
         foreach (var x in m.OrderByDescending(x => x.Item2).Take(25)) Console.WriteLine("  " + N(x.Item2) + "\t" + x.Item1);
