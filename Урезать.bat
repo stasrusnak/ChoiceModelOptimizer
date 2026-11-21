@@ -6,12 +6,12 @@ if "%DIR%"=="" set /p "DIR=Models folder (e.g. F:\ChoiceModels): "
 if "%DIR%"=="" goto :eof
 echo.
 echo === Dry run (nothing is changed yet) ===
-"%~dp0ChoiceOptimizer.exe" "%DIR%"
+"%~dp0Wc3ModelOptimizer.exe" "%DIR%"
 echo.
 set "OK="
 set /p "OK=Apply these changes? (y = yes): "
 if /i not "%OK%"=="y" goto :end
-"%~dp0ChoiceOptimizer.exe" "%DIR%" --write
+"%~dp0Wc3ModelOptimizer.exe" "%DIR%" --write
 :end
 echo.
 pause

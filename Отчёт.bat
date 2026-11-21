@@ -4,6 +4,6 @@ rem Report: heaviest models by particles and largest textures. Changes nothing.
 set "DIR=%~1"
 if "%DIR%"=="" set /p "DIR=Models folder (e.g. F:\ChoiceModels): "
 if "%DIR%"=="" goto :eof
-"%~dp0ChoiceOptimizer.exe" "%DIR%" --report
+"%~dp0Wc3ModelOptimizer.exe" "%DIR%" --report
 echo.
 pause

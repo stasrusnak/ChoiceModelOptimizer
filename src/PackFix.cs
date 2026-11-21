@@ -1,4 +1,4 @@
-// ChoicePackFix — массовое облегчение пака моделей Warcraft III 1.26 (BLP1 / MDX v800).
+// Wc3ModelOptimizer — массовое облегчение пака моделей Warcraft III 1.26 (BLP1 / MDX v800).
 // Текстуры: площадь > 512x512 — в 4 раза меньше по стороне, ровно 512x512 — в 2 раза (основным становится
 // готовый мип-уровень, без пережатия; после записи размер в JPEG проверяется, при ошибке файл возвращается).
 // Частицы (PRE2): эмиттер с пиком > 1000 частиц — частота до ~600 (не больше чем в 4 раза); выброс за раз > 200 —
@@ -134,7 +134,7 @@ class PackFix
 
     static void Help()
     {
-        Console.WriteLine("ChoiceOptimizer <папка> [--write] [--backup <папка>] [--textures-only | --particles-only] [--force] [--report] [--half a.blp,b.blp [--half4]] [--max 256 | --keep-size] [--quality 65] [--mark-done]");
+        Console.WriteLine("Wc3ModelOptimizer <папка> [--write] [--backup <папка>] [--textures-only | --particles-only] [--force] [--report] [--half a.blp,b.blp [--half4]] [--max 256 | --keep-size] [--quality 65] [--mark-done]");
         Console.WriteLine("  без --write  — только пробный прогон и журнал _packfix_log.txt");
         Console.WriteLine("  --write      — изменить файлы (оригиналы копируются в <папка>_backup, если их там ещё нет)");
         Console.WriteLine("  --force      — урезать и файлы из _packfix_done.txt (уже обработанные)");

@@ -1,4 +1,4 @@
-// ChoicePackFix — окно: те же действия, что у ChoiceOptimizer.exe и .bat-файлов, движок PackFix.cs (собирается с /define:GUI).
+﻿// Wc3ModelOptimizer — окно: те же действия, что у Wc3ModelOptimizer.exe и .bat-файлов, движок PackFix.cs (собирается с /define:GUI).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,7 +12,9 @@ using System.Windows.Forms;
 
 class PackFixGui : Form
 {
-    TextBox tDir, tBak, tHalf, tOut;
+    TextBox tDir, tBak, tHalf;
+    RichTextBox tOut;
+    string pending = ""; // незаконченная строка вывода — раскрашивается целиком, когда придёт перевод строки
     RadioButton rAll, rTex, rPart;
     CheckBox cForce;
     ComboBox cHalf, cTex;
@@ -27,6 +29,7 @@ class PackFixGui : Form
         cDim = Color.FromArgb(150, 150, 155), cAccent = Color.FromArgb(0, 102, 184);
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
     [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string id);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
     Label lHint;
     Button bDry, bWrite, bReport, bMark, bLog;
     List<Control> lockable = new List<Control>();
@@ -59,7 +62,7 @@ class PackFixGui : Form
 
     PackFixGui(string startDir)
     {
-        Text = "ChoicePackFix — облегчение пака моделей";
+        Text = "Wc3ModelOptimizer — облегчение пака моделей";
         Font = new Font("Segoe UI", 9f);
         AutoScaleMode = AutoScaleMode.Font;
         ClientSize = new Size(940, 680);
@@ -154,10 +157,10 @@ class PackFixGui : Form
         t.Controls.Add(bf, 0, t.RowCount); t.SetColumnSpan(bf, 3); t.RowStyles.Add(new RowStyle(SizeType.AutoSize)); t.RowCount++;
 
         // вывод
-        tOut = new TextBox
+        tOut = new RichTextBox
         {
-            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, MaxLength = 0,
-            Dock = DockStyle.Fill, Font = new Font("Consolas", 9f), BackColor = SystemColors.Window
+            ReadOnly = true, ScrollBars = RichTextBoxScrollBars.Both, WordWrap = false, DetectUrls = false,
+            Dock = DockStyle.Fill, Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.None
         };
         t.Controls.Add(tOut, 0, t.RowCount); t.SetColumnSpan(tOut, 3); t.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); t.RowCount++;
 
@@ -174,7 +177,7 @@ class PackFixGui : Form
         tDir.Text = d0;
         Theme(this);
         lHint.ForeColor = cDim;
-        tOut.ForeColor = Color.White; // журнал — чисто белый, чтобы читался на тёмном фоне
+        tOut.BackColor = Color.FromArgb(24, 24, 26); tOut.ForeColor = Color.White; // журнал — на тёмном фоне, строки раскрашиваются в LineColor
         bWrite.BackColor = cAccent; bWrite.FlatAppearance.BorderColor = cAccent; bWrite.FlatAppearance.MouseOverBackColor = Color.FromArgb(0, 120, 212);
         tOut.HandleCreated += delegate { SetWindowTheme(tOut.Handle, "DarkMode_Explorer", null); };
 
@@ -368,7 +371,7 @@ class PackFixGui : Form
         if (!CheckDir()) return;
         busy = true;
         Lock(true);
-        tOut.Clear();
+        tOut.Clear(); pending = "";
         Append("=== " + title + " ===\r\n");
         pb.Value = 0;
         lStat.Text = "Идёт… подсчёт файлов";
@@ -409,7 +412,8 @@ class PackFixGui : Form
                 UpdateHint();
                 pb.Value = code == 0 ? 1 : pb.Value; // отчёт и отметка идут без счётчика — по завершении полоса полная
                 lStat.Text = (code == 0 ? "Готово" : "Завершено с ошибкой") + " за " + sw.Elapsed.TotalSeconds.ToString("0.0") + " с.";
-                tOut.SelectionStart = 0; tOut.ScrollToCaret();
+                FlushOut();
+                tOut.SelectionStart = 0; tOut.SelectionLength = 0; tOut.ScrollToCaret();
             });
         });
         th.IsBackground = true;
@@ -418,9 +422,70 @@ class PackFixGui : Form
 
     void Append(string s)
     {
-        s = s.Replace("\r\n", "\n").Replace("\n", "\r\n");
-        if (tOut.InvokeRequired) tOut.BeginInvoke((MethodInvoker)delegate { tOut.AppendText(s); });
-        else tOut.AppendText(s);
+        if (tOut.InvokeRequired) { tOut.BeginInvoke((MethodInvoker)delegate { Append(s); }); return; }
+        pending += s.Replace("\r\n", "\n");
+        int nl = pending.LastIndexOf('\n');
+        if (nl < 0) return;
+        string[] lines = pending.Substring(0, nl).Split('\n');
+        pending = pending.Substring(nl + 1);
+        SendMessage(tOut.Handle, 0x000B, IntPtr.Zero, IntPtr.Zero); // WM_SETREDRAW выкл — тысячи строк журнала без мигания
+        foreach (string l in lines) AddLine(l);
+        SendMessage(tOut.Handle, 0x000B, (IntPtr)1, IntPtr.Zero);
+        tOut.Invalidate();
+    }
+
+    // остаток без перевода строки (в конце работы)
+    void FlushOut() { if (pending != "") { AddLine(pending); pending = ""; } }
+
+    static readonly Font fBold = new Font("Consolas", 9f, FontStyle.Bold);
+    // текст белый; в парах «было -> стало» было — оранжевым, стало — зелёным; строки ошибок — целиком красным
+    static readonly Color
+        colFrom = Color.FromArgb(255, 170, 90),    // было
+        colTo = Color.FromArgb(110, 225, 120),     // стало
+        colArrow = Color.FromArgb(140, 140, 145),  // ->
+        colErr = Color.FromArgb(255, 95, 95),      // ошибка, «меньше на … МБ (…%)»
+        colJpg = Color.FromArgb(255, 220, 80),     // JPG — жёлтый
+        colMdx = Color.FromArgb(200, 140, 255),    // MDX — фиолетовый
+        colBlp = Color.FromArgb(64, 224, 208);     // BLP — бирюзовый
+    static readonly System.Text.RegularExpressions.Regex FromTo =
+        new System.Text.RegularExpressions.Regex(@"([\w.,]+)( -> )([\w.,]+)"),
+        Less = new System.Text.RegularExpressions.Regex(@"меньше на [\d.,]+ МБ( \(\d+%\))?");
+
+    void AddLine(string l)
+    {
+        bool bold = l.StartsWith("===") || l.StartsWith("Общий вес") || l.StartsWith("ЗАПИСЬ") || l.StartsWith("ПРОБНЫЙ");
+        Font f = bold ? fBold : tOut.Font;
+        if (l.StartsWith("ERR") || l.StartsWith("BAD") || l.StartsWith("JPG ошибка") || l.StartsWith("ОШИБКА"))
+        { Put(l + "\n", colErr, f); return; }
+        // цвет каждого символа: белый, затем поверх — формат файла, было/стало, «меньше на»
+        Color[] col = new Color[l.Length];
+        for (int i = 0; i < col.Length; i++) col[i] = Color.White;
+        Color tag = l.StartsWith("JPG ") ? colJpg : l.StartsWith("BLP ") ? colBlp : l.StartsWith("MDX ") ? colMdx : Color.Empty;
+        if (tag != Color.Empty) for (int i = 0; i < 3; i++) col[i] = tag;
+        foreach (System.Text.RegularExpressions.Match m in FromTo.Matches(l))
+        {
+            Tint(col, m.Groups[1], colFrom); Tint(col, m.Groups[2], colArrow); Tint(col, m.Groups[3], colTo);
+        }
+        foreach (System.Text.RegularExpressions.Match m in Less.Matches(l)) Tint(col, m, colErr);
+        // вывести отрезками одного цвета
+        for (int i = 0; i < l.Length;)
+        {
+            int j = i; while (j < l.Length && col[j] == col[i]) j++;
+            Put(l.Substring(i, j - i), col[i], f);
+            i = j;
+        }
+        Put("\n", Color.White, f);
+    }
+
+    static void Tint(Color[] col, System.Text.RegularExpressions.Group g, Color c) { for (int i = g.Index; i < g.Index + g.Length; i++) col[i] = c; }
+
+    void Put(string s, Color c, Font f)
+    {
+        if (s == "") return;
+        tOut.Select(tOut.TextLength, 0);
+        tOut.SelectionColor = c;
+        tOut.SelectionFont = f;
+        tOut.SelectedText = s;
     }
 
     class BoxWriter : TextWriter
